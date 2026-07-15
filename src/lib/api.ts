@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+export const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
 export class ApiError extends Error {
   status: number;
@@ -62,23 +62,84 @@ export function approveLead(id: string, opsKey: string) {
   });
 }
 
-export interface SalesChatResponse {
-  ok: boolean;
-  reply: string;
+// ClawAgent Sales Associate (xAI Grok Voice realtime). The browser never sees
+// XAI_API_KEY: it fetches non-secret config, mints a short-lived ephemeral
+// token, then opens the realtime WebSocket directly against XAI_REALTIME_WSS_URL.
+export interface SalesAssociateConfig {
+  enabled: boolean;
+  ready: boolean;
+  keyConfigured: boolean;
+  agentId?: string;
+  model?: string;
+  voice?: string;
+  realtimeUrl: string;
+  tokenTtlSeconds?: number;
+  tokenEndpoint: string;
+  conversationEndpoint: string;
+  inboxPath?: string;
+  phoneNumber?: string | null;
+  phoneNumberDisplay?: string | null;
+  phoneHref?: string | null;
+  wsProtocolPrefix: string;
 }
 
-export function sendSalesMessage(sessionId: string, message: string) {
-  return request<SalesChatResponse>('/api/sales/chat', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sessionId, message }),
-  });
+export async function fetchSalesAssociateConfig(): Promise<SalesAssociateConfig> {
+  const res = await fetch(`${API_BASE}/api/claw/sales-associate/config`);
+  if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => res.statusText));
+  return res.json();
 }
 
-export function endSalesSession(sessionId: string) {
-  return request<{ ok: boolean }>('/api/sales/end', {
+export interface SalesAssociateToken {
+  token: { value: string; expiresAt: number };
+  agentId?: string;
+  model?: string;
+  voice?: string;
+  realtimeUrl: string;
+  wsProtocolPrefix: string;
+}
+
+export async function mintSalesAssociateToken(): Promise<SalesAssociateToken> {
+  const res = await fetch(`${API_BASE}/api/claw/sales-associate/token`, {
     method: 'POST',
-    body: JSON.stringify({ session_id: sessionId }),
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
   });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data?.token?.value) {
+    throw new ApiError(res.status, data.message || data.reason || 'Could not start the sales associate right now.');
+  }
+  return data;
+}
+
+export interface SalesConversationTurn {
+  role: 'user' | 'assistant';
+  content: string;
+  at?: string;
+}
+
+export interface SalesConversationSaved {
+  id: string;
+  extracted?: { emails?: string[]; phones?: string[]; websites?: string[] };
+}
+
+export async function saveSalesConversation(payload: {
+  turns: SalesConversationTurn[];
+  channel: string;
+  reason: string;
+  started_at: string | null;
+  ended_at: string;
+  agent_id?: string;
+  model?: string;
+}): Promise<SalesConversationSaved> {
+  const res = await fetch(`${API_BASE}/api/claw/sales-associate/conversation`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    keepalive: true,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(res.status, data.message || data.reason || `HTTP ${res.status}`);
+  return data.conversation;
 }
 
 export type GatewayStatus = 'checking' | 'online' | 'offline';
