@@ -502,6 +502,8 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
   }, []);
 
   const callActive = status === 'live';
+  const textInputId = 'sales-associate-text-input';
+  const canSendText = Boolean(input.trim()) && !sending;
   const dotClass =
     status === 'live'
       ? 'bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.6)] animate-pulse'
@@ -582,36 +584,56 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
             </div>
           </div>
 
-          <div className="flex gap-3 mb-6">
+          <div className="flex flex-col sm:flex-row gap-3 mb-6">
             <button
+              type="button"
               onClick={startCall}
               disabled={!config?.ready || status === 'connecting' || status === 'live'}
-              className="px-6 py-3 rounded-lg border border-slate-700 text-slate-300 font-medium hover:bg-slate-800 transition-colors bg-[#0A0D14]/50 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              aria-describedby="sales-associate-voice-status"
+              className="min-h-12 px-6 py-3 rounded-lg border border-slate-700 text-slate-300 font-medium hover:bg-slate-800 transition-colors bg-[#0A0D14]/50 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
             >
               Start voice call
             </button>
             <button
+              type="button"
               onClick={endCall}
               disabled={!callActive}
-              className="px-6 py-3 rounded-lg border border-slate-800 text-slate-500 font-medium bg-[#0A0D14]/30 disabled:cursor-not-allowed enabled:text-slate-300 enabled:border-slate-700 enabled:hover:bg-slate-800 transition-colors"
+              className="min-h-12 px-6 py-3 rounded-lg border border-slate-800 text-slate-500 font-medium bg-[#0A0D14]/30 disabled:cursor-not-allowed enabled:text-slate-300 enabled:border-slate-700 enabled:hover:bg-slate-800 transition-colors"
             >
               End call
             </button>
           </div>
 
           <button
+            type="button"
             onPointerDown={(e) => {
               e.preventDefault();
+              e.currentTarget.setPointerCapture(e.pointerId);
               beginTalk();
             }}
             onPointerUp={(e) => {
               e.preventDefault();
+              if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
               endTalk();
             }}
             onPointerLeave={endTalk}
             onPointerCancel={endTalk}
+            onKeyDown={(e) => {
+              if ((e.key === ' ' || e.key === 'Enter') && !recording) {
+                e.preventDefault();
+                beginTalk();
+              }
+            }}
+            onKeyUp={(e) => {
+              if (e.key === ' ' || e.key === 'Enter') {
+                e.preventDefault();
+                endTalk();
+              }
+            }}
             disabled={!callActive}
-            className={`w-full font-semibold py-4 rounded-xl mb-6 transition-all shadow-[0_0_20px_rgba(20,184,166,0.15)] border disabled:opacity-50 disabled:cursor-not-allowed ${
+            aria-pressed={recording}
+            aria-describedby="sales-associate-voice-status"
+            className={`w-full min-h-16 touch-none select-none font-semibold py-4 rounded-xl mb-2 transition-all shadow-[0_0_20px_rgba(20,184,166,0.15)] border disabled:opacity-50 disabled:cursor-not-allowed ${
               recording
                 ? 'bg-gradient-to-r from-red-600/80 to-orange-500/80 border-red-400/40 text-white'
                 : 'bg-gradient-to-r from-teal-700/80 to-cyan-700/80 hover:from-teal-600 hover:to-cyan-600 text-slate-200 border-teal-500/30'
@@ -619,6 +641,9 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
           >
             {recording ? 'Release to send' : 'Hold to talk'}
           </button>
+          <p id="sales-associate-voice-status" className="mb-6 text-xs text-slate-500">
+            Start a voice call first, then press and hold this button. Keyboard users can hold Space or Enter.
+          </p>
 
           <div className="bg-[#0A0D14] border border-purple-500/10 rounded-xl h-48 p-5 mb-4 overflow-y-auto flex flex-col gap-3">
             {messages.length === 0 ? (
@@ -667,24 +692,34 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
             Open sales inbox <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
           </button>
 
-          <div className="flex gap-2">
+          <form
+            className="flex flex-col sm:flex-row gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleSendText();
+            }}
+          >
+            <label htmlFor={textInputId} className="sr-only">
+              Text chat message
+            </label>
             <input
+              id={textInputId}
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
               placeholder="Type a message to the sales associate..."
-              className="flex-1 bg-[#0A0D14] border border-slate-800 rounded-xl px-4 py-4 text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors disabled:opacity-50"
+              autoComplete="off"
+              className="min-h-14 flex-1 bg-[#0A0D14] border border-slate-800 rounded-xl px-4 py-4 text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors disabled:opacity-50"
             />
             <button
-              onClick={handleSendText}
-              disabled={sending || !input.trim()}
-              className="flex items-center gap-2 bg-gradient-to-r from-purple-500 to-cyan-400 hover:from-purple-400 hover:to-cyan-300 text-white font-bold px-8 rounded-xl transition-all shadow-lg shadow-cyan-500/20 disabled:opacity-50"
+              type="submit"
+              disabled={!canSendText}
+              className="min-h-14 flex items-center justify-center gap-2 bg-gradient-to-r from-purple-500 to-cyan-400 hover:from-purple-400 hover:to-cyan-300 text-white font-bold px-8 rounded-xl transition-all shadow-lg shadow-cyan-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Send className="w-4 h-4" />
-              {sending ? '…' : 'Send'}
+              {sending ? 'Sending…' : 'Send'}
             </button>
-          </div>
+          </form>
         </div>
       </div>
 
