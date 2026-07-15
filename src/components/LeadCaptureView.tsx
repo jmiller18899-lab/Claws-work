@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { ArrowRight } from 'lucide-react';
 import { submitLead, ApiError } from '../lib/api';
 
@@ -10,13 +10,16 @@ export default function LeadCaptureView({ onSwitch }: { onSwitch: () => void }) 
   const [website, setWebsite] = useState('');
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string | null>(null);
+  // The server's spam guard rejects submissions without a render timestamp,
+  // or submitted less than 3s after the form first rendered.
+  const pageRenderedAtRef = useRef(Date.now());
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setStatus('submitting');
     setError(null);
     try {
-      await submitLead({ name, email, website });
+      await submitLead({ name, email, website, pageRenderedAt: pageRenderedAtRef.current });
       setStatus('success');
       setName('');
       setEmail('');

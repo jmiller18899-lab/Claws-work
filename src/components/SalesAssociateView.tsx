@@ -6,6 +6,9 @@ import {
   fetchSalesAssociateConfig,
   mintSalesAssociateToken,
   saveSalesConversation,
+  sendSalesChatMessage,
+  sendOutreachSms,
+  sendOutreachCall,
   type SalesAssociateConfig,
   type SalesConversationTurn,
 } from '../lib/api';
@@ -42,15 +45,38 @@ function downsample(float32: Float32Array, inRate: number, outRate: number): Flo
   return result;
 }
 
+// Bare 10-digit input is assumed US (+1); anything already '+'-prefixed
+// passes through digit-cleaned. Mirrors the server's own toE164() so the
+// dial tool can disable itself before ever hitting the network.
+function toE164(raw: string): string {
+  const value = raw.trim();
+  if (!value) return '';
+  if (value.startsWith('+')) {
+    const digits = value.slice(1).replace(/\D/g, '');
+    return digits.length >= 8 && digits.length <= 15 ? `+${digits}` : '';
+  }
+  const digits = value.replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  return '';
+}
+
 export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void }) {
+  const [sessionId] = useState(() => crypto.randomUUID());
   const [config, setConfig] = useState<SalesAssociateConfig | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [status, setStatus] = useState<CallStatus>('checking');
   const [statusText, setStatusText] = useState('Checking availability…');
   const [banner, setBanner] = useState<{ text: string; ok: boolean } | null>(null);
   const [recording, setRecording] = useState(false);
   const [saveInfo, setSaveInfo] = useState<string | null>(null);
+
+  const [dialNumber, setDialNumber] = useState('');
+  const [dialSending, setDialSending] = useState<'sms' | 'call' | null>(null);
+  const [dialMessage, setDialMessage] = useState<{ text: string; ok: boolean } | null>(null);
 
   const configRef = useRef<SalesAssociateConfig | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -67,13 +93,12 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
   const callStartedAtRef = useRef<string | null>(null);
   const conversationSavedRef = useRef(false);
   const savingRef = useRef(false);
-  const pendingTextsRef = useRef<string[]>([]);
 
   useEffect(() => {
     configRef.current = config;
   }, [config]);
 
-  // ---- transcript bookkeeping -------------------------------------------
+  // ---- transcript bookkeeping (shared by text chat + voice call) ---------
   function addMessage(role: ChatMessage['role'], streamKey: string | undefined, initialText: string): ChatMessage {
     const msg: ChatMessage = { id: crypto.randomUUID(), role, text: initialText, streamKey };
     messagesRef.current = [...messagesRef.current, msg];
@@ -125,6 +150,27 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
       setSaveInfo(`Could not save conversation: ${err instanceof ApiError ? err.message : String(err)}`);
     } finally {
       savingRef.current = false;
+    }
+  }
+
+  // ---- text chat: POST /api/sales/chat (OpenRouter, no realtime session) --
+  async function handleSendText() {
+    const text = input.trim();
+    if (!text || sending) return;
+    setInput('');
+    setChatError(null);
+    addMessage('user', undefined, text);
+    setSending(true);
+    try {
+      const history = messagesRef.current
+        .filter((m) => m.text.trim())
+        .map((m) => ({ role: m.role, content: m.text.trim() }));
+      const { reply } = await sendSalesChatMessage(sessionId, history);
+      addMessage('assistant', undefined, reply);
+    } catch (err) {
+      setChatError(err instanceof ApiError ? err.message : 'Could not reach the sales associate. Please try again.');
+    } finally {
+      setSending(false);
     }
   }
 
@@ -213,7 +259,7 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
     }
   }
 
-  // ---- realtime protocol ---------------------------------------------------
+  // ---- voice call: xAI Grok Voice realtime WebSocket ------------------------
   function sendEvent(payload: unknown) {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(payload));
@@ -264,12 +310,6 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
     }
   }
 
-  function restorePendingTexts() {
-    if (!pendingTextsRef.current.length) return;
-    const pending = pendingTextsRef.current.splice(0).join(' ');
-    setInput((prev) => [pending, prev.trim()].filter(Boolean).join(' '));
-  }
-
   async function startCall() {
     if (connectingRef.current || wsRef.current?.readyState === WebSocket.OPEN) return;
     connectingRef.current = true;
@@ -289,17 +329,15 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
       ws.addEventListener('open', () => {
         connectingRef.current = false;
         awaitingResponseRef.current = false;
-        messagesRef.current = [];
-        setMessages([]);
+        // Only reset streaming-turn bookkeeping, not the transcript itself —
+        // prior text-chat turns (a separate backend session) stay visible.
         turnKeysRef.current = {};
         callStartedAtRef.current = new Date().toISOString();
         conversationSavedRef.current = false;
         setSaveInfo(null);
         setBanner(null);
         setStatus('live');
-        setStatusText('Connected — say hi or type a message.');
-        const pending = pendingTextsRef.current.splice(0);
-        pending.forEach((text) => sendText(text));
+        setStatusText('Connected — say hi.');
       });
 
       ws.addEventListener('message', (evt) => {
@@ -325,8 +363,7 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
         setStatus(ready ? 'idle' : 'error');
         setStatusText(ready ? 'Call ended. Ready to reconnect.' : 'Sales associate offline.');
         if (wasConnecting) {
-          restorePendingTexts();
-          setBanner({ text: '⚠️ Could not connect. Your message is still in the box — tap Send to retry.', ok: false });
+          setBanner({ text: '⚠️ Could not connect. Please try again.', ok: false });
         } else {
           saveConversationNow('socket_close');
         }
@@ -335,9 +372,8 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
       connectingRef.current = false;
       setStatus('error');
       setStatusText('Could not connect.');
-      restorePendingTexts();
       setBanner({
-        text: `⚠️ ${err instanceof ApiError ? err.message : 'Failed to connect. Your message is still in the box.'}`,
+        text: `⚠️ ${err instanceof ApiError ? err.message : 'Failed to start the voice call.'}`,
         ok: false,
       });
     }
@@ -354,37 +390,6 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
     } else {
       saveConversationNow('end_call');
     }
-  }
-
-  function sendText(text: string): boolean {
-    const trimmed = text.trim();
-    const cfg = configRef.current;
-    if (!trimmed || !cfg || !cfg.ready) return false;
-
-    if (wsRef.current?.readyState !== WebSocket.OPEN) {
-      pendingTextsRef.current.push(trimmed);
-      setStatus('connecting');
-      setStatusText('Connecting to send your message…');
-      startCall();
-      return true;
-    }
-
-    addMessage('user', undefined, trimmed);
-    sendEvent({
-      type: 'conversation.item.create',
-      item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: trimmed }] },
-    });
-    if (!awaitingResponseRef.current) {
-      awaitingResponseRef.current = true;
-      sendEvent({ type: 'response.create' });
-    }
-    setStatus('live');
-    setStatusText('Sales associate is responding…');
-    return true;
-  }
-
-  function handleSend() {
-    if (sendText(input)) setInput('');
   }
 
   async function beginTalk() {
@@ -417,6 +422,32 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
     setStatusText('Sales associate is responding…');
   }
 
+  // ---- "Text or call any number" outreach tool (Twilio, server-side) ------
+  const dialE164 = toE164(dialNumber);
+
+  async function handleDialSend(kind: 'sms' | 'call') {
+    if (!dialE164 || dialSending) return;
+    setDialSending(kind);
+    setDialMessage(null);
+    const idempotencyKey = crypto.randomUUID();
+    try {
+      if (kind === 'sms') {
+        await sendOutreachSms(dialE164, 'Hi — this is the ClawAgent sales team. Reach out any time!', idempotencyKey);
+        setDialMessage({ text: `Text sent to ${dialE164}.`, ok: true });
+      } else {
+        await sendOutreachCall(dialE164, idempotencyKey);
+        setDialMessage({ text: `Calling ${dialE164}…`, ok: true });
+      }
+    } catch (err) {
+      setDialMessage({
+        text: err instanceof ApiError ? err.message : `Could not ${kind === 'sms' ? 'text' : 'call'} that number.`,
+        ok: false,
+      });
+    } finally {
+      setDialSending(null);
+    }
+  }
+
   // ---- lifecycle -----------------------------------------------------------
   useEffect(() => {
     let cancelled = false;
@@ -427,12 +458,12 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
         setConfig(cfg);
         if (!cfg.enabled) {
           setStatus('error');
-          setStatusText('Sales associate is disabled.');
-          setBanner({ text: 'The sales associate is currently turned off.', ok: false });
+          setStatusText('Voice call is disabled.');
+          setBanner({ text: 'The voice call feature is currently turned off. Text chat still works.', ok: false });
         } else if (!cfg.ready) {
           setStatus('error');
-          setStatusText('Sales associate not configured.');
-          setBanner({ text: 'This deployment does not have the sales associate configured yet.', ok: false });
+          setStatusText('Voice call not configured.');
+          setBanner({ text: 'Voice call is not configured on this deployment yet. Text chat still works.', ok: false });
         } else {
           setStatus('idle');
           setStatusText('Sales associate online. Type a message or start a voice call.');
@@ -523,20 +554,32 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
               <input
                 type="text"
                 placeholder="(555) 123-4567"
+                value={dialNumber}
+                onChange={(e) => setDialNumber(e.target.value)}
                 className="flex-1 bg-[#0A0D14] border border-slate-800 rounded-lg px-4 py-3 text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors"
               />
               <div className="flex gap-2">
-                <button className="flex-1 sm:flex-none flex justify-center items-center gap-2 bg-[#1A2133] hover:bg-[#232D45] text-slate-300 px-6 py-3 rounded-lg font-medium transition-colors border border-slate-700/50">
+                <button
+                  onClick={() => handleDialSend('sms')}
+                  disabled={!dialE164 || dialSending !== null}
+                  className="flex-1 sm:flex-none flex justify-center items-center gap-2 bg-[#1A2133] hover:bg-[#232D45] text-slate-300 px-6 py-3 rounded-lg font-medium transition-colors border border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
                   <MessageSquare className="w-4 h-4" />
-                  Text
+                  {dialSending === 'sms' ? 'Sending…' : 'Text'}
                 </button>
-                <button className="flex-1 sm:flex-none flex justify-center items-center gap-2 bg-[#1A2133] hover:bg-[#232D45] text-slate-300 px-6 py-3 rounded-lg font-medium transition-colors border border-slate-700/50">
+                <button
+                  onClick={() => handleDialSend('call')}
+                  disabled={!dialE164 || dialSending !== null}
+                  className="flex-1 sm:flex-none flex justify-center items-center gap-2 bg-[#1A2133] hover:bg-[#232D45] text-slate-300 px-6 py-3 rounded-lg font-medium transition-colors border border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
                   <Phone className="w-4 h-4" />
-                  Call
+                  {dialSending === 'call' ? 'Calling…' : 'Call'}
                 </button>
               </div>
             </div>
-            <div className="text-xs text-slate-500 mt-3">Enter a phone number, then choose Text or Call.</div>
+            <div className={`text-xs mt-3 ${dialMessage ? (dialMessage.ok ? 'text-emerald-400' : 'text-red-400') : 'text-slate-500'}`}>
+              {dialMessage ? dialMessage.text : 'Enter a phone number, then choose Text or Call.'}
+            </div>
           </div>
 
           <div className="flex gap-3 mb-6">
@@ -615,6 +658,7 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
           {banner && (
             <div className={`text-sm mb-4 ${banner.ok ? 'text-emerald-400' : 'text-red-400'}`}>{banner.text}</div>
           )}
+          {chatError && <div className="text-sm mb-4 text-red-400">{chatError}</div>}
 
           <button
             onClick={onSwitch}
@@ -628,18 +672,17 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-              disabled={!config?.ready}
+              onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
               placeholder="Type a message to the sales associate..."
               className="flex-1 bg-[#0A0D14] border border-slate-800 rounded-xl px-4 py-4 text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors disabled:opacity-50"
             />
             <button
-              onClick={handleSend}
-              disabled={!config?.ready || status === 'connecting' || !input.trim()}
+              onClick={handleSendText}
+              disabled={sending || !input.trim()}
               className="flex items-center gap-2 bg-gradient-to-r from-purple-500 to-cyan-400 hover:from-purple-400 hover:to-cyan-300 text-white font-bold px-8 rounded-xl transition-all shadow-lg shadow-cyan-500/20 disabled:opacity-50"
             >
               <Send className="w-4 h-4" />
-              Send
+              {sending ? '…' : 'Send'}
             </button>
           </div>
         </div>
