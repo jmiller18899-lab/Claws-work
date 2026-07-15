@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://clawagent-production-52da.up.railway.app/sitemap.xml
