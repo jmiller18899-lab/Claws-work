@@ -1,4 +1,12 @@
-export const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+const configuredApiBase = import.meta.env.VITE_API_BASE?.trim();
+
+// AI Studio/static hosts do not serve the gateway's /api routes themselves. If
+// VITE_API_BASE is omitted there, same-origin POSTs can fail with 405 Method
+// Not Allowed before they ever reach ClawAgent. Default to the production
+// gateway so deployed previews keep working; same-origin gateway deployments
+// can still opt in by explicitly setting VITE_API_BASE to an empty string.
+export const API_BASE =
+  configuredApiBase === undefined ? 'https://clawagent-production-6805.up.railway.app' : configuredApiBase;
 
 export class ApiError extends Error {
   status: number;
