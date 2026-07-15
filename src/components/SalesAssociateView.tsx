@@ -1,6 +1,54 @@
-import { Phone, MessageSquare, ArrowRight } from 'lucide-react';
+import { useState } from 'react';
+import { Phone, MessageSquare, ArrowRight, Send } from 'lucide-react';
+import { sendSalesMessage, endSalesSession, ApiError } from '../lib/api';
+
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  text: string;
+}
 
 export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void }) {
+  const [sessionId] = useState(() => crypto.randomUUID());
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const [ended, setEnded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSend = async () => {
+    const text = input.trim();
+    if (!text || sending || ended) return;
+
+    setMessages((prev) => [...prev, { role: 'user', text }]);
+    setInput('');
+    setSending(true);
+    setError(null);
+
+    try {
+      const { reply } = await sendSalesMessage(sessionId, text);
+      setMessages((prev) => [...prev, { role: 'assistant', text: reply }]);
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? `Message failed (${err.status}).`
+          : 'Could not reach the sales associate. Please try again.'
+      );
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleEndCall = async () => {
+    if (ended || messages.length === 0) return;
+    try {
+      await endSalesSession(sessionId);
+    } catch {
+      // Transcript may not have saved; surfacing this isn't actionable for the user here.
+    } finally {
+      setEnded(true);
+    }
+  };
+
   return (
     <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
       <div className="mb-8">
@@ -19,7 +67,7 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
       <div className="bg-[#111627] border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
         {/* Subtle inner glow */}
         <div className="absolute inset-0 bg-gradient-to-br from-purple-900/10 to-transparent pointer-events-none"></div>
-        
+
         <div className="relative z-10">
           <div className="flex items-center gap-3 mb-6">
             <div className="w-3 h-3 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.5)]"></div>
@@ -35,9 +83,9 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
           <div className="border border-slate-800 rounded-xl p-5 mb-6 bg-[#0E121E]">
             <div className="text-sm font-medium text-slate-400 mb-3">Text or call any number</div>
             <div className="flex flex-col sm:flex-row gap-3">
-              <input 
-                type="text" 
-                placeholder="(555) 123-4567" 
+              <input
+                type="text"
+                placeholder="(555) 123-4567"
                 className="flex-1 bg-[#0A0D14] border border-slate-800 rounded-lg px-4 py-3 text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors"
               />
               <div className="flex gap-2">
@@ -58,8 +106,12 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
             <button className="px-6 py-3 rounded-lg border border-slate-700 text-slate-300 font-medium hover:bg-slate-800 transition-colors bg-[#0A0D14]/50">
               Start voice call
             </button>
-            <button className="px-6 py-3 rounded-lg border border-slate-800 text-slate-500 font-medium bg-[#0A0D14]/30 cursor-not-allowed">
-              End call
+            <button
+              onClick={handleEndCall}
+              disabled={ended || messages.length === 0}
+              className="px-6 py-3 rounded-lg border border-slate-800 text-slate-500 font-medium bg-[#0A0D14]/30 disabled:cursor-not-allowed enabled:text-slate-300 enabled:border-slate-700 enabled:hover:bg-slate-800 transition-colors"
+            >
+              {ended ? 'Call ended' : 'End call'}
             </button>
           </div>
 
@@ -67,11 +119,28 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
             Hold to talk
           </button>
 
-          <div className="bg-[#0A0D14] border border-purple-500/10 rounded-xl h-48 p-5 mb-4 flex items-start text-slate-500 italic text-sm">
-            Your conversation will appear here.
+          <div className="bg-[#0A0D14] border border-purple-500/10 rounded-xl h-48 p-5 mb-4 overflow-y-auto flex flex-col gap-3">
+            {messages.length === 0 ? (
+              <span className="text-slate-500 italic text-sm">Your conversation will appear here.</span>
+            ) : (
+              messages.map((m, i) => (
+                <div
+                  key={i}
+                  className={`text-sm max-w-[85%] px-3 py-2 rounded-lg ${
+                    m.role === 'user'
+                      ? 'self-end bg-purple-500/20 text-purple-100'
+                      : 'self-start bg-slate-800/60 text-slate-200'
+                  }`}
+                >
+                  {m.text}
+                </div>
+              ))
+            )}
           </div>
 
-          <button 
+          {error && <div className="text-red-400 text-sm mb-4">{error}</div>}
+
+          <button
             onClick={onSwitch}
             className="flex items-center gap-1 text-cyan-400 hover:text-cyan-300 text-sm font-medium transition-colors mb-4 group"
           >
@@ -79,18 +148,27 @@ export default function SalesAssociateView({ onSwitch }: { onSwitch: () => void 
           </button>
 
           <div className="flex gap-2">
-            <input 
-              type="text" 
-              placeholder="Type a message to the sales associate..." 
-              className="flex-1 bg-[#0A0D14] border border-slate-800 rounded-xl px-4 py-4 text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors"
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+              disabled={ended}
+              placeholder="Type a message to the sales associate..."
+              className="flex-1 bg-[#0A0D14] border border-slate-800 rounded-xl px-4 py-4 text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition-colors disabled:opacity-50"
             />
-            <button className="bg-gradient-to-r from-purple-500 to-cyan-400 hover:from-purple-400 hover:to-cyan-300 text-white font-bold px-8 rounded-xl transition-all shadow-lg shadow-cyan-500/20">
-              Send
+            <button
+              onClick={handleSend}
+              disabled={sending || ended || !input.trim()}
+              className="flex items-center gap-2 bg-gradient-to-r from-purple-500 to-cyan-400 hover:from-purple-400 hover:to-cyan-300 text-white font-bold px-8 rounded-xl transition-all shadow-lg shadow-cyan-500/20 disabled:opacity-50"
+            >
+              <Send className="w-4 h-4" />
+              {sending ? '…' : 'Send'}
             </button>
           </div>
         </div>
       </div>
-      
+
       <p className="mt-6 text-xs text-slate-600 leading-relaxed max-w-2xl">
         Definition of Done: prospect can hold a live text/voice conversation with the sales associate; when the call ends the transcript is saved and leads are queued for action.
       </p>
