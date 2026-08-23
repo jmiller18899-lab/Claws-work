@@ -1,0 +1,11 @@
+FROM ghcr.io/anomalyco/opencode:1.18.17
+
+USER root
+RUN apk add --no-cache git openssh-client ca-certificates
+
+WORKDIR /workspace
+COPY . /workspace
+
+ENTRYPOINT []
+EXPOSE 4096
+CMD ["sh", "-lc", "opencode serve --hostname 0.0.0.0 --port ${PORT:-4096}"]
